@@ -23,6 +23,10 @@
 
 #include <cstdlib>
 #include <iterator>
+#include <vector>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include "MBUtils.h"
 #include "VoiceUtils.h"
 #include "fileutil.h"
@@ -297,6 +301,48 @@ bool Sayer::handleSetVolume(string volume)
 }
 
 //---------------------------------------------------------
+// Procedure: runNoShell()
+//   Purpose: Run a program with an explicit argument vector.  There is no
+//            shell involved, so nothing in the arguments can be interpreted
+//            as shell syntax.  The text spoken here arrives in a MOOS
+//            variable from any client, so it must never reach a shell.
+
+static bool runNoShell(const std::vector<std::string>& argv, bool background)
+{
+  if(argv.empty())
+    return(false);
+
+  pid_t pid = fork();
+  if(pid < 0)
+    return(false);
+
+  if(pid == 0) {
+    std::vector<char*> cargv;
+    for(unsigned int i=0; i<argv.size(); i++)
+      cargv.push_back(const_cast<char*>(argv[i].c_str()));
+    cargv.push_back(0);
+    execvp(cargv[0], &cargv[0]);
+    _exit(127);                       // exec failed
+  }
+
+  if(background) {
+    // Do not block, but do not leave a zombie either: this reaps whatever
+    // has finished since the last call.
+    int status = 0;
+    while(waitpid(-1, &status, WNOHANG) > 0)
+      ;
+    return(true);
+  }
+
+  int status = 0;
+  if(waitpid(pid, &status, 0) < 0)
+    return(false);
+
+  return(WIFEXITED(status) && (WEXITSTATUS(status) == 0));
+}
+
+
+//---------------------------------------------------------
 // Procedure: sayUtterance()
 //   Purpose: Process the top element in the queue
 
@@ -322,6 +368,11 @@ bool Sayer::sayUtterance()
   string srce  = utter.getSource();
   string text  = utter.getText();
   string file  = utter.getFile();
+
+  // The program and its arguments are kept apart so that no shell ever sees
+  // the text, which is published by any MOOS client.  cmd below is only used
+  // for the debug notification and the error message.
+  std::vector<std::string> argv;
   string cmd;
   //-------------------------------------------------
   // Case 1: Utterance is in the form of text
@@ -339,24 +390,33 @@ bool Sayer::sayUtterance()
     if(text != "")
       reportEvent("Say:" + text);
     
-    // Build the system command string (OSX)
+    // Build the argument vector (OSX)
     if((m_os_mode == "osx") || (m_os_mode == "both")) {
-      cmd  = "say -r " + str_rate;
-      if(voice != "")
-	cmd += " -v " + voice;
+      argv.push_back("say");
+      argv.push_back("-r");
+      argv.push_back(str_rate);
+      if(voice != "") {
+	argv.push_back("-v");
+	argv.push_back(voice);
+      }
 
       // Ex: $ say "[[volm 2]] Hello"
       if(m_volume != 1)
 	text = "[[volm " + doubleToStringX(m_volume) + "]] " + text;
 
-      cmd += " \"" + text + "\" ";
+      argv.push_back(text);
     }
-    // Build the system command string (Linux)
+    // Build the argument vector (Linux)
     else if((m_os_mode == "linux") || (m_os_mode == "both")) {
-      cmd = "espeak -s " + str_rate;
-      if(voice != "")
-	cmd += " -v " + voice;
-      cmd += "--stdin \"" + text + "\" ";
+      argv.push_back("espeak");
+      argv.push_back("-s");
+      argv.push_back(str_rate);
+      if(voice != "") {
+	argv.push_back("-v");
+	argv.push_back(voice);
+      }
+      argv.push_back("--stdin");
+      argv.push_back(text);
     }
 
   }
@@ -389,14 +449,18 @@ bool Sayer::sayUtterance()
       return(false);
     }
 
-    // Build the system command string (OSX)
+    // Build the argument vector (OSX)
     if((m_os_mode == "osx") || (m_os_mode == "both")) {
-      cmd = "afplay -v " + doubleToString(m_volume);
-      cmd += " " + found_file;
+      argv.push_back("afplay");
+      argv.push_back("-v");
+      argv.push_back(doubleToString(m_volume));
+      argv.push_back(found_file);
     }
-    // Build the system command string (Linux)
-    else if((m_os_mode == "linux") || (m_os_mode == "both"))
-      cmd = "aplay " + found_file;
+    // Build the argument vector (Linux)
+    else if((m_os_mode == "linux") || (m_os_mode == "both")) {
+      argv.push_back("aplay");
+      argv.push_back(found_file);
+    }
     
   }
   else {
@@ -404,19 +468,28 @@ bool Sayer::sayUtterance()
     return(false);
   }
 
-  // By adding an ampersand at the end of the command line, it runs the 
-  // job in the background thus returning immediately.
-  if(m_interval_policy == "from_start")
-    cmd += " &";
+  if(argv.empty()) {
+    reportRunWarning("No audio command configured for os_mode=" + m_os_mode);
+    return(false);
+  }
 
-  // We don't check the act on the result, but we get it anyway to avoid
-  // a compiler warning.
-  int result;
+  // A readable form of what is about to run, for the debug notification and
+  // the error message only.  It is never handed to a shell.
+  for(unsigned int i=0; i<argv.size(); i++) {
+    if(i > 0)
+      cmd += " ";
+    cmd += argv[i];
+  }
+
+  // The from_start policy used to append an ampersand so the shell would run
+  // the job in the background; without a shell that becomes "do not wait".
+  bool background = (m_interval_policy == "from_start");
+
   Notify("ISAY_DEBUGA", cmd);
-  result = system(cmd.c_str());
+  bool ok = runNoShell(argv, background);
   Notify("ISAY_DEBUGB", cmd);
 
-  if(result != 0) 
+  if(!ok) 
     cout << "Possible error in the iSay syscmd:" << cmd << endl;
 
   return(true);
