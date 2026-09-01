@@ -22,6 +22,14 @@
 /*****************************************************************/
 
 #include <cstdlib>
+#include <vector>
+#include <string>
+#include <cstdio>
+#include <fcntl.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <iterator>
 #include "MBUtils.h"
 #include "ACTable.h"
@@ -162,6 +170,66 @@ void MemWatch::handleMailDBClients(string clients)
 //---------------------------------------------------------
 // Procedure: measureMemory()
 
+//------------------------------------------------------------
+// Procedure: safeFileNamePart()
+//   Purpose: A client name arrives in DB_CLIENTS and is chosen by whoever
+//            connected to the MOOSDB.  It is used to build a file name here,
+//            so keep only characters which cannot mean anything to a shell,
+//            a path or an option parser.
+
+static std::string safeFileNamePart(const std::string& str)
+{
+  std::string out;
+  for(unsigned int i=0; i<str.length(); i++) {
+    char c = str[i];
+    if(((c >= 'a') && (c <= 'z')) || ((c >= 'A') && (c <= 'Z')) ||
+       ((c >= '0') && (c <= '9')) || (c == '_') || (c == '-') || (c == '.'))
+      out += c;
+  }
+  return(out);
+}
+
+//------------------------------------------------------------
+// Procedure: runToFile()
+//   Purpose: Run a program with an explicit argument vector, with its stdout
+//            redirected to the given file.  No shell is involved, so nothing
+//            in the arguments or in the file name can be interpreted as
+//            shell syntax.
+
+static bool runToFile(const std::vector<std::string>& argv,
+		      const std::string& outfile)
+{
+  if(argv.empty())
+    return(false);
+
+  pid_t pid = fork();
+  if(pid < 0)
+    return(false);
+
+  if(pid == 0) {
+    int fd = open(outfile.c_str(), O_WRONLY|O_CREAT|O_TRUNC, 0644);
+    if(fd < 0)
+      _exit(127);
+    if(dup2(fd, STDOUT_FILENO) < 0)
+      _exit(127);
+    close(fd);
+
+    std::vector<char*> cargv;
+    for(unsigned int i=0; i<argv.size(); i++)
+      cargv.push_back(const_cast<char*>(argv[i].c_str()));
+    cargv.push_back(0);
+    execvp(cargv[0], &cargv[0]);
+    _exit(127);
+  }
+
+  int status = 0;
+  if(waitpid(pid, &status, 0) < 0)
+    return(false);
+
+  return(WIFEXITED(status) && (WEXITSTATUS(status) == 0));
+}
+
+
 void MemWatch::measureMemory()
 {
   // Sanity check
@@ -177,10 +245,13 @@ void MemWatch::measureMemory()
   //         Make the system call
   string app = m_app[ix];
   string pid = m_pid[ix];
-  string tmp_file = ".mem_info_" + tolower(app) + "_" + pid;
-  string syscall = "appmem.sh --pid=" + m_pid[ix];
-  syscall += " > " + tmp_file;  
-  system(syscall.c_str());
+  string tmp_file = ".mem_info_" + safeFileNamePart(tolower(app)) + "_" +
+                    safeFileNamePart(pid);
+
+  std::vector<std::string> argv;
+  argv.push_back("appmem.sh");
+  argv.push_back("--pid=" + pid);
+  runToFile(argv, tmp_file);
 
   // Part 3: Get the output of the system call
   vector<string> lines = fileBuffer(tmp_file);
@@ -188,8 +259,7 @@ void MemWatch::measureMemory()
     return;
 
   // Part 4: Remove temporary file holding first sys call output
-  string syscall_rm = "rm -f " + tmp_file + " &";
-  system(syscall_rm.c_str());
+  remove(tmp_file.c_str());
   
   // Part 5: Intpret the output. Normall this is just an integer
   //         representing the mem size in Kilobytes. But we also
