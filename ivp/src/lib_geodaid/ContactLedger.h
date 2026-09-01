@@ -47,6 +47,13 @@ public: // General configuration
   void setActiveVName(std::string vname); 
   void setHistorySize(unsigned int v) {m_history_size=v;}
 
+  // Ceiling on how many distinct contacts this ledger will hold.  Every name
+  // in a NODE_REPORT creates an entry, and the history cap is per contact,
+  // not on the number of contacts, so an unauthenticated publisher can grow
+  // the ledger and everything which walks it without bound.
+  void setMaxContacts(unsigned int v) {m_max_contacts=v;}
+  unsigned int getMaxContacts() const  {return(m_max_contacts);}
+
 public: // Config stale node and extrapolation policy
   bool setExtrapPolicy(std::string);
   bool setExtrapMode(std::string);
@@ -131,6 +138,7 @@ protected: // Config vars
   int    m_extrap_mode;      // 0:off, 1:hdg, 2:cog
   
   unsigned int m_history_size;
+  unsigned int m_max_contacts;
 
   std::string m_active_vname;
     
