@@ -38,6 +38,11 @@ using namespace std;
 
 FldNodeComms::FldNodeComms()
 {
+  // A NODE_MESSAGE names the node it came from in its own body; require that
+  // to match the community the message arrived from.
+  m_bind_msg_src_to_community = true;
+  m_rejected_msg_source       = 0;
+
   // The default range within which reports are sent between nodes
   m_comms_range      = 100;
 
@@ -111,7 +116,7 @@ bool FldNodeComms::OnNewMail(MOOSMSG_LIST &NewMail)
     if((key == "NODE_REPORT") || (key == "NODE_REPORT_LOCAL")) 
       handled = handleMailNodeReport(sval, whynot);
     else if((key == "NODE_MESSAGE") || (key == "MEDIATED_MESSAGE"))
-      handled = handleMailNodeMessage(sval, msrc);
+      handled = handleMailNodeMessage(sval, msrc, msg.GetCommunity());
     else if(key == "ACK_MESSAGE") 
       handled = handleMailAckMessage(sval);
     else if(key == "UNC_SHARED_NODE_REPORTS") 
@@ -257,6 +262,8 @@ bool FldNodeComms::OnStartUp()
       handled = setNonNegDoubleOnString(m_min_msg_interval, value);
     else if(param == "min_rpt_interval") 
       handled = setNonNegDoubleOnString(m_min_rpt_interval, value);
+    else if(param == "bind_msg_src_to_community")
+      handled = setBooleanOnString(m_bind_msg_src_to_community, value);
     else if(param == "max_msg_length")
       handled = setUIntOnString(m_max_msg_length, value);
     else if(param == "stealth") 
@@ -329,7 +336,8 @@ bool FldNodeComms::handleMailNodeReport(const string& str, string& whynot)
 //                           var_name=FOO, string_val=bar   
 
 bool FldNodeComms::handleMailNodeMessage(const string& msg,
-					 const string& msg_src)
+					 const string& msg_src,
+					 const string& msg_community)
 {
   NodeMessage new_message = string2NodeMessage(msg);
   
@@ -347,6 +355,18 @@ bool FldNodeComms::handleMailNodeMessage(const string& msg,
   // then add it here. Added Mar 30, 2022.
   if(new_message.getSourceApp() == "")
     new_message.setSourceApp(msg_src);
+
+  // Part 3b: The src_node field decides which ledger entry the range,
+  // staleness and group checks below are evaluated against, and which node
+  // the recipient believes sent the message.  It is a field in the message
+  // body, so a publisher can put any node's name in it.  The community the
+  // message actually arrived from is set by the MOOSDB, so require the two to
+  // agree unless a deployment has turned that off.
+  if(m_bind_msg_src_to_community && (msg_community != "") &&
+     !MOOSStrCmp(new_message.getSourceNode(), msg_community)) {
+    m_rejected_msg_source++;
+    return(false);
+  }
 
   // Part 4: 
   string upp_src_node = new_message.getSourceNode();
