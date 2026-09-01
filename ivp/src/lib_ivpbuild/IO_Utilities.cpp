@@ -140,10 +140,12 @@ vector<IvPFunction*> readFunctions(const string& str)
     if(c == 'F') {
       int buff_ix = 0;
       while(c != '\n') {
-	result = fscanf(f, "%c", &c);
+	// fscanf() leaves c unchanged at end of file, so without this the
+	// loop never terminates on a truncated file
+	if(fscanf(f, "%c", &c) != 1)
+	  break;
 	if(buff_ix < MAX_LINE_LENGTH-1)
-	  buff[buff_ix] = c;
-	buff_ix++;
+	  buff[buff_ix++] = c;
       }
       buff[buff_ix] = '\0';
     }
@@ -180,10 +182,11 @@ vector<IvPFunction*> readFunctions(const string& str)
     if(c == 'A') {
       int buff_ix = 0;
       while(c != '\n') {
-	result = fscanf(f, "%c", &c);
-	if(buff_ix < MAX_LINE_LENGTH)
-	  buff[buff_ix] = c;
-	buff_ix++;
+	// as above: stop at end of file, and leave room for the terminator
+	if(fscanf(f, "%c", &c) != 1)
+	  break;
+	if(buff_ix < MAX_LINE_LENGTH-1)
+	  buff[buff_ix++] = c;
       }
       buff[buff_ix] = '\0';
       contextStr = buff;
@@ -196,6 +199,14 @@ vector<IvPFunction*> readFunctions(const string& str)
     IvPDomain domain = stringToDomain(domain_str);
     
     PDMap *pdmap = readPDMap(f, dim, boxCount, domain, degree);
+
+    // readPDMap() returns null on a file it cannot make sense of, and
+    // IvPFunction's constructor asserts on a null pdmap
+    if(!pdmap) {
+      fclose(f);
+      return(rvector);
+    }
+
     IvPFunction *new_of = new IvPFunction(pdmap);
     new_of->setContextStr(contextStr);
     new_of->setPWT(pwt);
@@ -229,11 +240,22 @@ PDMap* readPDMap(FILE *f, int dim, int boxCount, IvPDomain domain, int deg)
 
   PDMap *pdmap = new PDMap(boxCount, domain, deg);
 
+  // Bounds read from the file are used to index the grid built below, so they
+  // have to lie inside the domain.  Anything else is not a short read, it is
+  // an unusable function.
+  int dim_pts[dim];
+  for(d=0; d<dim; d++)
+    dim_pts[d] = (d < (int)domain.size()) ? domain.getVarPoints(d) : 0;
+
   IvPBox gelbox(dim);
   if(c == 'G') {
     for(d=0; d<dim; d++) {
       result = fscanf(f, "%d ", &low);
       result = fscanf(f, "%d ", &high);
+      if((low < 0) || (high < low) || (high >= dim_pts[d])) {
+	delete pdmap;
+	return(0);
+      }
       gelbox.setPTS(d, low, high);
     }
     pdmap->setGelBox(gelbox);
@@ -241,11 +263,20 @@ PDMap* readPDMap(FILE *f, int dim, int boxCount, IvPDomain domain, int deg)
 
   for(int i=0; i<boxCount; i++) {
     result = fscanf(f, "%c ", &c);
-    result = fscanf(f, "%d ", &wtc);
+    if(fscanf(f, "%d ", &wtc) != 1)
+      break;
     IvPBox *newbox = new IvPBox(dim, deg);
+
+    // wtc comes from the file but the box was sized from dim and deg, so a
+    // larger figure would write past the end of newbox's weight array
+    if((wtc < 0) || (wtc > newbox->getWtc()))
+      wtc = newbox->getWtc();
+
     for(d=0; d<dim; d++) {
-      result = fscanf(f, "%s ", lowBuff);
-      result = fscanf(f, "%s ", highBuff);
+      // width limits must match the buffers below, or a long token is a
+      // stack overflow
+      result = fscanf(f, "%79s ", lowBuff);
+      result = fscanf(f, "%79s ", highBuff);
       if(lowBuff[0]=='X') {         // Check for bound Xclusive
 	newbox->bd(d, 0) = 0;       // bound. If X is first char
 	lowBuff[0] = '+';           // set bound to exclusive (0)
@@ -256,10 +287,15 @@ PDMap* readPDMap(FILE *f, int dim, int boxCount, IvPDomain domain, int deg)
       }
       low = atoi(lowBuff);
       high = atoi(highBuff);
+      if((low < 0) || (high < low) || (high >= dim_pts[d])) {
+	delete newbox;
+	delete pdmap;
+	return(0);
+      }
       newbox->setPTS(d, low, high);
     }
     for(d=0; d<wtc; d++) {
-      result = fscanf(f, "%s ", buff);
+      result = fscanf(f, "%499s ", buff);
       newbox->wt(d) = atof(buff);
     }
     pdmap->bx(i) = newbox;
