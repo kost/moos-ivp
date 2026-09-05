@@ -608,9 +608,7 @@ bool SplitHandler::handlePreCheckSplitDir()
   }
 
   // Part 3: Create and Verify the split directory.
-  // Make the base directory.  basedir is derived from the input pathname or
-  // taken from --dir=, so it must be treated as opaque filesystem data: a
-  // shell would interpret anything in it.
+  // Make the base directory
   int result = mkdir(basedir.c_str(), 0755);
   if(result != 0)
     cout << "Possible err in SplitHandler mkdir: "
